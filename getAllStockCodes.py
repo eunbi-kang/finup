@@ -16,18 +16,25 @@ def get_all_stock_codes():
     html = StringIO(res.text)
     df = pd.read_html(html)[0]
 
+    # 필요한 컬럼만 추출하고 컬럼명 변경
     df = df[['회사명', '종목코드']]
-    df['종목코드'] = df['종목코드'].apply(lambda x: str(x).zfill(6))
+    df.columns = ['name', 'code']
 
-    # 종목코드로 시장구분 유추
+    # 종목코드 6자리로 패딩
+    df['code'] = df['code'].apply(lambda x: str(x).zfill(6))
+
+    # 시장 구분 추론 함수
     def infer_market(code):
         code_int = int(code)
-        if code_int >= 100000:
-            return "KOSDAQ"
+        if code_int >= 100000 and code_int < 900000:
+            return 'KOSDAQ'
+        elif code_int >= 900000:
+            return 'KONEX'
         else:
-            return "KOSPI"
+            return 'KOSPI'
 
-    df['시장구분'] = df['종목코드'].apply(infer_market)
+    df['market'] = df['code'].apply(infer_market)
+
     return df
 
 def save_stock_codes_to_json(df, save_path='data/stock_list.json'):
