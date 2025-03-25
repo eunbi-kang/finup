@@ -1,64 +1,109 @@
+import os
 import json
-import time
 import requests
-from bs4 import BeautifulSoup
+from tqdm import tqdm
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
-def get_keyword_idx_from_code(stock_code):
-    url = f"https://finance.finup.co.kr/Stock/{stock_code}"
-    headers = {
-        "User-Agent": "Mozilla/5.0"
-    }
+NEWS_API_URL = "https://apiradar.finup.co.kr/App"
+HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120.0.0.0 Safari/537.36",
+    "Content-Type": "application/json"
+}
 
-    try:
-        response = requests.get(url, headers=headers, timeout=5)
-        if response.status_code != 200:
-            print(f"❌ HTTP Error {response.status_code} for {stock_code}")
-            return None
+INPUT_PATH = "./data/stock_list_with_newsKeywordIdx.json"
+OUTPUT_DIR = "./news_data"
+MAX_WORKERS = 10  # 동시에 실행할 스레드 수
+os.makedirs(OUTPUT_DIR, exist_ok=True)
 
-        soup = BeautifulSoup(response.text, 'html.parser')
-        keyword_input = soup.find("input", {"id": "hfStockDetailRelationThemeKeywordIdx"})
 
-        if keyword_input and keyword_input.has_attr("value"):
-            return keyword_input["value"]
-        else:
-            print(f"❌ KeywordIdx not found for {stock_code}")
-            return None
-    except Exception as e:
-        print(f"❌ Exception for {stock_code}: {e}")
-        return None
+def fetch_news_by_keyword_idx(news_idx):
+    all_news = []
+    page = 1
 
-def collect_all_keyword_idx(input_json_path, output_json_path):
-    with open(input_json_path, 'r', encoding='utf-8') as f:
+    while True:
+        body = {
+            "ApiID": "ALARM_HISTORY_KEYWORD",
+            "ApiGB": "ALARM",
+            "KeywordIdx": int(news_idx),
+            "PageNo": page,
+            "PageSize": 30,
+            "TypeFilter": "10"
+        }
+        try:
+            print(f"\n📡 [요청] KeywordIdx={news_idx}, Page={page}")
+            res = requests.post(NEWS_API_URL, headers=HEADERS, json=body, timeout=10)
+            print(f"🔍 상태코드: {res.status_code}")
+            data = res.json()
+            items = data.get("Result", [])[0] if isinstance(data.get("Result"), list) else []
+            print(f"📄 뉴스 개수: {len(items)}")
+
+            if not items:
+                print(f"🛑 더 이상 뉴스 없음 (페이지 {page})")
+                break
+
+            all_news.extend(items)
+            page += 1
+        except Exception as e:
+            print(f"❌ [KeywordIdx: {news_idx}] 요청 실패: {e}")
+            break
+
+    return all_news
+
+
+def save_news_jsonl(news_list, path, keyword_idx):
+    with open(path, "w", encoding="utf-8") as f:
+        for item in news_list:
+            if not isinstance(item, dict):
+                continue
+
+            title = item.get("Title")
+            # content = item.get("Content") or item.get("Summary")
+            # if not title or not content:
+            #     continue
+
+            record = {
+                "keyword": item.get("Keyword", ""),  # ✅ 종목명
+                "title": title,
+                "summary": item.get("Summary"),
+                "date": item.get("PublishDT", "")[:10],
+                "url": item.get("Url"),
+                "media": item.get("MediaName", ""),    # ✅ 언론사
+                "keywordIdx": keyword_idx
+            }
+            f.write(json.dumps(record, ensure_ascii=False) + "\n")
+
+
+def crawl_single(stock):
+    name = stock["name"]
+    code = stock["code"]
+    news_idx = stock.get("newsKeywordIdx")
+
+    if not news_idx:
+        return f"⚠️  {name} ({code}) → newsKeywordIdx 없음"
+
+    print(f"\n🚀 {name} ({code}) 뉴스 수집 시작 → newsKeywordIdx: {news_idx}")
+    file_path = os.path.join(OUTPUT_DIR, f"{code}.jsonl")
+    news_items = fetch_news_by_keyword_idx(news_idx)
+
+    if news_items:
+        save_news_jsonl(news_items, file_path, news_idx)
+        return f"✅ {name} ({code}) 뉴스 {len(news_items)}건 저장"
+    else:
+        return f"⚠️  {name} ({code}) 뉴스 없음"
+
+
+def crawl_news_all():
+    with open(INPUT_PATH, "r", encoding="utf-8") as f:
         stock_list = json.load(f)
 
     results = []
+    with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
+        futures = [executor.submit(crawl_single, stock) for stock in stock_list]
+        for future in tqdm(as_completed(futures), total=len(futures), desc="📰 병렬 뉴스 수집 중"):
+            result = future.result()
+            results.append(result)
+            print(result)
 
-    for idx, stock in enumerate(stock_list, 1):
-        name = stock.get("name")
-        code = stock.get("code")
-        market = stock.get("market")
 
-        print(f"[{idx}/{len(stock_list)}] ⏳ Processing {name} ({code})...")
-
-        keyword_idx = get_keyword_idx_from_code(code)
-        if keyword_idx:
-            results.append({
-                "KeywordIdx": keyword_idx,
-                "name": name,
-                "code": code,
-                "market": market
-            })
-            print(f"✅ Collected KeywordIdx: {keyword_idx}")
-        else:
-            print(f"⚠️ Failed to get KeywordIdx for {name} ({code})")
-
-        time.sleep(0.5)  # 서버에 부담 안 주도록 딜레이
-
-    # 저장
-    with open(output_json_path, 'w', encoding='utf-8') as f:
-        json.dump(results, f, ensure_ascii=False, indent=2)
-
-    print(f"\n🎉 Done! Saved {len(results)} stocks with KeywordIdx to {output_json_path}")
-
-# 예시 실행
-collect_all_keyword_idx("stock_list.json", "stock_with_keyword_idx.json")
+if __name__ == "__main__":
+    crawl_news_all()
